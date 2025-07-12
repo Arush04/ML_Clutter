@@ -12,7 +12,8 @@ from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, OffloadPol
 from torch.distributed.device_mesh import init_device_mesh
 from ddmp_basic import ddpm_simple
 from model import UNET
-from utils import DDPM_Scheduler, set_seed
+from utils import DDPM_Scheduler, set_seed, ImageOnlyDataset
+from torch.utils.checkpoint import checkpoint
 
 def update_ema(ema_model, model, decay):
     with torch.no_grad():
@@ -22,9 +23,7 @@ def update_ema(ema_model, model, decay):
             if key in model_state:
                 ema_param = ema_state[key]
                 model_param = model_state[key]
-                # Ensure both parameters are DTensor or both are regular tensors
                 if hasattr(ema_param, "to_local") and hasattr(model_param, "to_local"):
-                    # Operate on local shards for DTensor
                     ema_param_local = ema_param.to_local()
                     model_param_local = model_param.to_local()
                     if ema_param_local.shape == model_param_local.shape:
@@ -36,7 +35,6 @@ def update_ema(ema_model, model, decay):
                             f"model_param_local.shape={model_param_local.shape}"
                         )
                 else:
-                    # Handle non-DTensor case (shouldn't occur with FSDP2)
                     if ema_param.shape == model_param.shape:
                         ema_param.mul_(decay).add_(model_param, alpha=1 - decay)
                     else:
@@ -53,19 +51,23 @@ def main(args):
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     dist.init_process_group(backend="nccl", rank=rank)
-    torch.manual_seed(0)
+    set_seed(0)
 
     # Data
-    train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transforms.ToTensor())
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=4)
+    transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    train_dataset = ImageOnlyDataset(image_dir="DIV2K_train_HR", transform=transform)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=2)
 
     # Model: Initialize on meta device for FSDP2
     with torch.device("meta"):
-        model = UNET()
+        model = UNET(input_channels=3, output_channels=3, device=device)
     model.to_empty(device=device)
-    # EMA model (also on meta, then materialized)
     with torch.device("meta"):
-        ema_model = UNET()
+        ema_model = UNET(input_channels=3, output_channels=3, device=device)
     ema_model.to_empty(device=device)
 
     # FSDP2 sharding
@@ -79,18 +81,16 @@ def main(args):
     world_size = dist.get_world_size()
     device_mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp2",))
     fully_shard(model, mesh=device_mesh, **fsdp_kwargs)
-    fully_shard(ema_model, mesh=device_mesh, **fsdp_kwargs)  # <--- Shard EMA model
+    fully_shard(ema_model, mesh=device_mesh, **fsdp_kwargs)
 
-    # Copy initial weights from model to EMA model
     ema_model.load_state_dict(model.state_dict())
 
     # Optimizer, criterion, scheduler
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss(reduction='mean')
-    scheduler = DDPM_Scheduler(num_time_steps=args.num_time_steps)
-    scheduler.alpha = scheduler.alpha.to(device)
+    scheduler = DDPM_Scheduler(num_time_steps=args.num_time_steps, device=device)
+    scheduler = scheduler.to(device)
 
-    # Optionally resume from checkpoint (after materialization)
     if args.checkpoint_path is not None:
         checkpoint = torch.load(args.checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint['weights'])
@@ -100,12 +100,12 @@ def main(args):
     # Training loop
     for epoch in range(args.num_epochs):
         total_loss = 0
-        for bidx, (x, _) in enumerate(train_loader):
+        for bidx, x in enumerate(train_loader):
             x = x.to(device)
-            x = F.pad(x, (2, 2, 2, 2))
             t = torch.randint(0, args.num_time_steps, (args.batch_size,), device=device)
             e = torch.randn_like(x)
-            a = scheduler.alpha[t].view(args.batch_size, 1, 1, 1)
+            _, a = scheduler(t)  # Use alpha_cumprod from forward
+            a = a.view(args.batch_size, 1, 1, 1)
             x_noisy = (torch.sqrt(a) * x) + (torch.sqrt(1 - a) * e)
             
             optimizer.zero_grad()
@@ -116,12 +116,13 @@ def main(args):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             update_ema(ema_model, model, args.ema_decay)
-        print(f"Epoch {epoch+1} | Loss {total_loss / (len(train_loader)):.5f}")
+            if bidx % 10 == 0 and rank == 0:
+                print(f"Rank {rank} | Epoch {epoch+1} | Batch {bidx} | Loss {loss.item():.5f}")
+        if rank == 0:
+            print(f"Rank {rank} | Epoch {epoch+1} | Avg Loss {total_loss / len(train_loader):.5f}")
 
-    # Save checkpoint (gather full state dicts)
-    # Only rank 0 saves the checkpoint
+    # Save checkpoint
     if rank == 0:
-        # Use full_state_dict to gather the full state dictionary
         model_state = model.state_dict()
         ema_state = ema_model.state_dict()
         
@@ -132,6 +133,7 @@ def main(args):
         }
         os.makedirs('checkpoints', exist_ok=True)
         torch.save(checkpoint, f'checkpoints/ddpm_checkpoint_rank{rank}.pt')
+    
     dist.destroy_process_group()
 
 if __name__ == "__main__":
