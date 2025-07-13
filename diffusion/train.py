@@ -6,13 +6,12 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import transforms
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, OffloadPolicy
 from torch.distributed.device_mesh import init_device_mesh
 from timm.utils import ModelEmaV3
 from model import UNET
 from utils import DDPM_Scheduler, set_seed, ImageOnlyDataset
-from torch.utils.checkpoint import checkpoint
 
 def update_ema(ema_model, model, decay):
     with torch.no_grad():
