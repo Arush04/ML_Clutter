@@ -1,16 +1,15 @@
 import argparse
 import os
+import wandb
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, OffloadPolicy, StateDictType
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, OffloadPolicy
 from torch.distributed.device_mesh import init_device_mesh
-from ddmp_basic import ddpm_simple
+from timm.utils import ModelEmaV3
 from model import UNET
 from utils import DDPM_Scheduler, set_seed, ImageOnlyDataset
 from torch.utils.checkpoint import checkpoint
@@ -46,14 +45,25 @@ def update_ema(ema_model, model, decay):
         ema_model.load_state_dict(ema_state)
 
 def main(args):
-    # Distributed setup
+    import torch
+    print(f"PyTorch Version: {torch.__version__}")
+    print(f"CUDA Available: {torch.cuda.is_available()}")
+    print(f"CUDA Version: {torch.version.cuda}")
+
     rank = int(os.environ["LOCAL_RANK"])
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     dist.init_process_group(backend="nccl", rank=rank)
     set_seed(0)
 
-    # Data
+    # Initialize wandb on rank 0 only
+    if rank == 0:
+        wandb.init(
+            project="FSDP2_DDPM",
+            name=f"fsdp2-run-{wandb.util.generate_id()}",
+            config=vars(args)
+        )
+
     transform = transforms.Compose([
         transforms.Resize((128, 128)),
         transforms.ToTensor(),
@@ -62,15 +72,11 @@ def main(args):
     train_dataset = ImageOnlyDataset(image_dir="DIV2K_train_HR", transform=transform)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=2)
 
-    # Model: Initialize on meta device for FSDP2
     with torch.device("meta"):
-        model = UNET(input_channels=3, output_channels=3, device=device)
-    model.to_empty(device=device)
+        model = UNET()
     with torch.device("meta"):
-        ema_model = UNET(input_channels=3, output_channels=3, device=device)
-    ema_model.to_empty(device=device)
+        ema = ModelEmaV3(model, decay=args.ema_decay)
 
-    # FSDP2 sharding
     fsdp_kwargs = {}
     if args.mixed_precision:
         fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
@@ -79,35 +85,39 @@ def main(args):
         )
         fsdp_kwargs["offload_policy"] = OffloadPolicy()
     world_size = dist.get_world_size()
-    device_mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp2",))
+    device_mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("data_parallel",))
+    print(f"Device Mesh: {device_mesh}")
+
     fully_shard(model, mesh=device_mesh, **fsdp_kwargs)
-    fully_shard(ema_model, mesh=device_mesh, **fsdp_kwargs)
+    model.to_empty(device="cuda")
+    ema = ema.to_empty(device="cuda")
 
-    ema_model.load_state_dict(model.state_dict())
-
-    # Optimizer, criterion, scheduler
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.MSELoss(reduction='mean')
-    scheduler = DDPM_Scheduler(num_time_steps=args.num_time_steps, device=device)
-    scheduler = scheduler.to(device)
+    scheduler = DDPM_Scheduler(num_time_steps=args.num_time_steps, device=device).to(device)
 
-    if args.checkpoint_path is not None:
-        checkpoint = torch.load(args.checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['weights'])
-        ema_model.load_state_dict(checkpoint['ema'])
+    if args.checkpoint_path is not None and rank == 0:
+        print(f"Loading checkpoint from {args.checkpoint_path}")
+        checkpoint = torch.load(args.checkpoint_path, map_location="cpu")
+        model.load_state_dict(checkpoint['weights'], strict=False)
+        ema.load_state_dict(checkpoint['ema'], strict=False)
         optimizer.load_state_dict(checkpoint['optimizer'])
 
-    # Training loop
+    dist.barrier()
+    
+    ctr = 0
+    # Training loop with wandb logging
     for epoch in range(args.num_epochs):
+        ctr += 1
         total_loss = 0
         for bidx, x in enumerate(train_loader):
             x = x.to(device)
             t = torch.randint(0, args.num_time_steps, (args.batch_size,), device=device)
             e = torch.randn_like(x)
-            _, a = scheduler(t)  # Use alpha_cumprod from forward
+            _, a = scheduler(t)
             a = a.view(args.batch_size, 1, 1, 1)
             x_noisy = (torch.sqrt(a) * x) + (torch.sqrt(1 - a) * e)
-            
+
             optimizer.zero_grad()
             output = model(x_noisy, t)
             loss = criterion(output, e)
@@ -115,25 +125,31 @@ def main(args):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            update_ema(ema_model, model, args.ema_decay)
+            update_ema(ema, model, args.ema_decay)
+
+            # Log loss per batch
             if bidx % 10 == 0 and rank == 0:
                 print(f"Rank {rank} | Epoch {epoch+1} | Batch {bidx} | Loss {loss.item():.5f}")
-        if rank == 0:
-            print(f"Rank {rank} | Epoch {epoch+1} | Avg Loss {total_loss / len(train_loader):.5f}")
+                wandb.log({"batch_loss": loss.item(), "epoch": epoch+1, "batch": bidx})
 
-    # Save checkpoint
+        avg_loss = total_loss / len(train_loader)
+        if rank == 0:
+            print(f"Rank {rank} | Epoch {epoch+1} | Avg Loss {avg_loss:.5f}")
+            wandb.log({"epoch_loss": avg_loss, "epoch": epoch+1})
+    # Save model checkpoint
     if rank == 0:
         model_state = model.state_dict()
-        ema_state = ema_model.state_dict()
-        
+        ema_state = ema.state_dict()
+        ema_state = {k.replace("module.", ""): v for k, v in ema_state.items()}
         checkpoint = {
             'weights': model_state,
             'optimizer': optimizer.state_dict(),
             'ema': ema_state
         }
         os.makedirs('checkpoints', exist_ok=True)
-        torch.save(checkpoint, f'checkpoints/ddpm_checkpoint_rank{rank}.pt')
-    
+        ckpt_path = f'checkpoints/ddpm_checkpoint_{ctr}.pt'
+        torch.save(checkpoint, ckpt_path)
+
     dist.destroy_process_group()
 
 if __name__ == "__main__":
