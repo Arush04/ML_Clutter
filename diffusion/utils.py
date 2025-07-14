@@ -1,15 +1,11 @@
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from einops import rearrange
-from typing import List
+import pickle
 import random
-import math
-import pdb
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image, ImageFilter
+from torch.utils.data import Dataset
+from PIL import Image
 
 def set_seed(seed: int = 42):
     torch.manual_seed(seed)
@@ -36,21 +32,35 @@ class DDPM_Scheduler(nn.Module):
         self.alpha = self.alpha.to(device)
         return self
 
-class ImageOnlyDataset(Dataset):
-    def __init__(self, image_dir, transform=None):
-        self.image_dir = image_dir
-        self.image_files = [f for f in os.listdir(image_dir) if f.lower().endswith(('.png'))]
+class CIFAR10Dataset(Dataset):
+    def __init__(self, data_dir, train=True, transform=None):
+        self.data = []
+        self.labels = []
         self.transform = transform
 
+        if train:
+            batch_files = [f'data_batch_{i}' for i in range(1, 6)]
+        else:
+            batch_files = ['test_batch']
+
+        for batch_file in batch_files:
+            with open(os.path.join(data_dir, batch_file), 'rb') as f:
+                entry = pickle.load(f, encoding='latin1')
+                self.data.append(entry['data'])
+                self.labels += entry['labels']
+
+        self.data = np.concatenate(self.data).reshape(-1, 3, 32, 32)
+        self.data = self.data.transpose(0, 2, 3, 1)  # Convert to HWC (32,32,3)
+
     def __len__(self):
-        return len(self.image_files)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        img_path = os.path.join(self.image_dir, self.image_files[idx])
-        image = Image.open(img_path).convert("RGB")
+        image = Image.fromarray(self.data[idx])
         if self.transform:
             image = self.transform(image)
-        return image
+        label = self.labels[idx]
+        return image, label
 
 def main():
     scheduler = DDPM_Scheduler(num_time_steps=1000)

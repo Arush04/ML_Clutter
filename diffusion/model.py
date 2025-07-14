@@ -105,14 +105,14 @@ class SinusoidalEmbeddings(nn.Module):
 
 class UNET(nn.Module):
     def __init__(self,
-                 Channels: List = [32, 64, 128, 256, 256, 256, 256, 128, 64, 32],
-                 Attentions: List = [False, False, True, True, True, True, True, False, False, False],
-                 Upscales: List = [False, False, False, False, True, True, True, True, True, True],
-                 num_groups: int = 32,
+                 Channels: List = [32, 64, 128, 128, 64, 32],
+                 Attentions: List = [False, False, True, True, False, False],
+                 Upscales: List = [False, False, False, True, True, True],
+                 num_groups: int = 8,
                  dropout_prob: float = 0.1,
                  num_heads: int = 8,
-                 input_channels: int = 3,
-                 output_channels: int = 3,
+                 input_channels: int = 3,  # RGB input
+                 output_channels: int = 3,  # RGB output
                  device: str = 'cuda',
                  time_steps: int = 1000):
         super().__init__()
@@ -121,7 +121,7 @@ class UNET(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.embeddings = SinusoidalEmbeddings(time_steps=time_steps, embed_dim=max(Channels), device=device)
 
-        # Encoder
+        # Encoder for 32x32 images
         self.enc_layers = nn.ModuleList()
         in_ch = Channels[0]
         for i in range(self.num_layers//2):
@@ -143,10 +143,10 @@ class UNET(nn.Module):
         # Decoder
         self.dec_layers = nn.ModuleList()
         for i in range(self.num_layers//2, self.num_layers):
-            skip_ch = Channels[self.num_layers-1-i]  # Channels from corresponding encoder layer
-            in_ch = in_ch + skip_ch  # Add skip connection channels
+            skip_ch = Channels[self.num_layers-1-i]
+            in_ch = in_ch + skip_ch
             out_ch = Channels[i]
-            is_last = (i == self.num_layers - 1)  # Mark the last layer
+            is_last = (i == self.num_layers - 1)
             self.dec_layers.append(
                 UnetLayer(
                     in_channels=in_ch,
@@ -160,27 +160,26 @@ class UNET(nn.Module):
                     is_last=is_last
                 )
             )
-            in_ch = out_ch if is_last else out_ch // 2  # Don't halve channels for last layer
+            in_ch = out_ch if is_last else out_ch // 2
 
         # Final convs
         self.late_conv = nn.Conv2d(Channels[-1], Channels[-1], kernel_size=3, padding=1)
         self.output_conv = nn.Conv2d(Channels[-1], output_channels, kernel_size=1)
 
     def forward(self, x, t):
+        # Input x is expected to be of shape [batch, 3, 32, 32]
         x = self.shallow_conv(x)
         embeddings = self.embeddings(t)
         residuals = []
 
-        # Encoder
+        # Encoder: downsampling reduces spatial size (32x32 -> 16x16 -> 8x8)
         for layer in self.enc_layers:
             x, r = layer(x, embeddings)
             residuals.append(r)
 
-        # Decoder
+        # Decoder: upsampling restores spatial size (8x8 -> 16x16 -> 32x32)
         for i, layer in enumerate(self.dec_layers):
-            # Concatenate with skip connection from encoder
             skip = residuals[-(i+1)]
-            # Make sure spatial sizes match
             if skip.shape[2:] != x.shape[2:]:
                 skip = F.interpolate(skip, size=x.shape[2:], mode='nearest')
             x = torch.cat([x, skip], dim=1)
@@ -188,4 +187,5 @@ class UNET(nn.Module):
 
         x = self.relu(self.late_conv(x))
         x = self.output_conv(x)
+        # Output shape: [batch, 3, 32, 32]
         return x
