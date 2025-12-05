@@ -1,4 +1,6 @@
 import torch
+import torchvision
+from torchvision import transforms
 from torch.utils.data import Dataset, TensorDataset, DataLoader
 import math
 import matplotlib.pyplot as plt
@@ -39,6 +41,63 @@ class Data(Dataset):
             return math.ceil(self.num_train/self.batch_size)
         else:
             return math.ceil(self.num_val/self.batch_size)
+
+class FashionMNIST(Dataset):
+    """Data Loader for FashionMNIST Dataset"""
+    def __init__(self, batch_size=32, resize=(28, 28)):
+        super().__init__()
+        self.batch_size = batch_size
+        self.resize = resize
+
+        transformed = transforms.Compose(
+                [transforms.Resize(resize), transforms.ToTensor()]                
+            )
+        self.train = torchvision.datasets.FashionMNIST(
+                root="data", train=True, transform=transformed, download=False
+            )
+        self.val = torchvision.datasets.FashionMNIST(
+                root="data", train=False, transform=transformed, download=False
+            )
+    
+    def text_labels(self, indices):
+        """Convert labels from int to text labels"""
+        labels = ['t-shirt', 'trouser', 'pullover', 'dress', 'coat', 'sandal', 'shirt', 'sneaker', 'bag', 'ankle boot']
+        # Convert tensor → list
+        if torch.is_tensor(indices):
+            indices = indices.tolist()
+
+        # If single integer
+        if isinstance(indices, int):
+            return labels[int(indices)]
+
+        return [labels[int(i)] for i in indices]
+    
+    def get_dataloader(self, train):
+        data = self.train if train else self.val
+        return DataLoader(data, self.batch_size, shuffle=train)
+
+    def get_length(self, train):
+        if train:
+            return len(self.get_dataloader(train=True))
+        else:
+            return len(self.get_dataloader(train=False))
+    
+    def visualize_data(self, batch, nrows=1, ncols=8, labels=[]):
+        X, y = batch
+        if not labels:
+            labels = self.text_labels(y)
+        plt.figure(figsize=(ncols * 2, nrows * 2))
+
+        for i in range(nrows * ncols):
+            if i >= len(X):
+                break
+            plt.subplot(nrows, ncols, i + 1)
+            plt.imshow(X[i].squeeze(), cmap="gray")
+            plt.title(labels[i], fontsize=8)
+            plt.axis("off")
+
+        plt.tight_layout()
+        plt.show()
 
 class ProgressBoard:
     """The board that plots data points in animation."""
