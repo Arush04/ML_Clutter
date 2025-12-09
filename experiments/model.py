@@ -6,12 +6,14 @@ from utils import ProgressBoard, l2_penalty
 class WeightDecayPenalty(nn.Module):
     def __init__(self, num_inputs, lbd, lr, sigma=0.01):
         super().__init__()
+        # Model hyperparameters
         self.net = nn.LazyLinear(1)
         self.num_inputs = num_inputs
         self.lbd = lbd
         self.lr = lr
         self.sigma = sigma
         self.w = torch.normal(0, self.sigma, (self.num_inputs, 1), requires_grad=True)
+        # utils for plotting grapgh
         self.board = ProgressBoard()
         self.plot_train_per_epoch=1
         self.plot_valid_per_epoch=1
@@ -100,6 +102,149 @@ class Classification(nn.Module):
 
     def config_optimizers(self):
         return torch.optim.SGD(self.parameters(), self.lr)
+        
+    def plot(self, key, value, train):
+        """Plot a point in animation."""
+        assert hasattr(self, 'trainer'), 'Trainer is not inited'
+        self.board.xlabel = 'epoch'
+        if train:
+            x = self.trainer.train_batch_idx / \
+                self.trainer.num_train_batches
+            n = self.trainer.num_train_batches / \
+                self.plot_train_per_epoch
+        else:
+            x = self.trainer.epoch + 1
+            n = self.trainer.num_val_batches / \
+                self.plot_valid_per_epoch
+        device = torch.device('cpu')
+        self.board.draw(x, value.to(device).detach().numpy(),
+                        ('train_' if train else 'val_') + key,
+                        every_n=int(n))
+
+class MLPClassificationModel(nn.Module):
+    """MLP architecture for classification model"""
+    def __init__(self, num_outputs, num_hiddens, lr):
+        super().__init__()
+        self.num_outputs = num_outputs
+        self.num_hiddens = num_hiddens
+        self.lr = lr
+        # initialzing the model architecture
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.LazyLinear(num_hiddens),
+            nn.ReLU(),
+            nn.LazyLinear(num_outputs)
+        )
+        self.board = ProgressBoard()
+        self.plot_train_per_epoch=1
+        self.plot_valid_per_epoch=1
+
+    def forward(self, X):
+        # X = X.reshape((X.shape[0], -1))
+        return self.net(X)
+        # X = X.reshape((X.shape[0], -1))
+        # H = nn.ReLU(torch.matmul(X, self.W1) + self.b1)
+        # return torch.matmul(H, self.W2) + self.b2
+
+    def training_step(self, batch):
+        l = self.loss(self(*batch[:-1]), batch[-1])
+        self.plot('loss', l, train=True)
+        return l
+
+    def validation_step(self, batch):
+        y_pred = self(*batch[:-1])
+        self.plot('loss', self.loss(y_pred, batch[-1]), train=False)
+        self.plot('acc', self.accuracy(y_pred, batch[-1]), train=False)
+    
+    def loss(self, y_pred, y, averaged=True):
+        y_pred = y_pred.reshape((-1, y_pred.shape[-1]))
+        y = y.reshape((-1,))
+        return F.cross_entropy(
+            y_pred, y, reduction='mean' if averaged else 'none'
+        )
+
+    def accuracy(self, y_pred, y, averaged=True):
+        y_pred = y_pred.reshape((-1, y_pred.shape[-1]))
+        preds = y_pred.argmax(axis=1).type(y.dtype)
+        compare = (preds == y.reshape(-1)).type(torch.float32)
+        return compare.mean() if averaged else compare
+
+    def config_optimizers(self):
+        return torch.optim.SGD(self.parameters(), self.lr)
+        
+    def plot(self, key, value, train):
+        """Plot a point in animation."""
+        assert hasattr(self, 'trainer'), 'Trainer is not inited'
+        self.board.xlabel = 'epoch'
+        if train:
+            x = self.trainer.train_batch_idx / \
+                self.trainer.num_train_batches
+            n = self.trainer.num_train_batches / \
+                self.plot_train_per_epoch
+        else:
+            x = self.trainer.epoch + 1
+            n = self.trainer.num_val_batches / \
+                self.plot_valid_per_epoch
+        device = torch.device('cpu')
+        self.board.draw(x, value.to(device).detach().numpy(),
+                        ('train_' if train else 'val_') + key,
+                        every_n=int(n))
+
+class MLPClassificationDropout(nn.Module):
+    """MLP architecture for classification model with dropout regularization"""
+    def __init__(self, num_outputs, num_hiddens_1, num_hiddens_2, dropout_1, dropout_2, lr):
+        super().__init__()
+        self.num_outputs = num_outputs
+        self.num_hiddens_1 = num_hiddens_1
+        self.num_hiddens_2 = num_hiddens_2
+        self.dropout_1 = dropout_1
+        self.dropout_2 = dropout_2
+        self.lr = lr
+        # initialzing the model architecture
+        self.net = nn.Sequential(
+            nn.Flatten(), nn.LazyLinear(num_hiddens_1), nn.ReLU(),
+            nn.Dropout(dropout_1), nn.LazyLinear(num_hiddens_2), nn.ReLU(),
+            nn.Dropout(dropout_2), nn.LazyLinear(num_outputs)
+        )
+        self.board = ProgressBoard()
+        self.plot_train_per_epoch=1
+        self.plot_valid_per_epoch=1
+
+    def forward(self, X):
+        return self.net(X)
+
+    def training_step(self, batch):
+        l = self.loss(self(*batch[:-1]), batch[-1])
+        self.plot('loss', l, train=True)
+        return l
+
+    def validation_step(self, batch):
+        y_pred = self(*batch[:-1])
+        self.plot('loss', self.loss(y_pred, batch[-1]), train=False)
+        self.plot('acc', self.accuracy(y_pred, batch[-1]), train=False)
+    
+    def loss(self, y_pred, y, averaged=True):
+        y_pred = y_pred.reshape((-1, y_pred.shape[-1]))
+        y = y.reshape((-1,))
+        return F.cross_entropy(
+            y_pred, y, reduction='mean' if averaged else 'none'
+        )
+
+    def accuracy(self, y_pred, y, averaged=True):
+        y_pred = y_pred.reshape((-1, y_pred.shape[-1]))
+        preds = y_pred.argmax(axis=1).type(y.dtype)
+        compare = (preds == y.reshape(-1)).type(torch.float32)
+        return compare.mean() if averaged else compare
+
+    def config_optimizers(self):
+        return torch.optim.SGD(self.parameters(), self.lr)
+
+    def dropout_layer(X, dropout):
+        assert 0 <= dropout <= 1
+        if dropout == 1: return torch.zeros_like(X)
+        # creat a mask tensor with same shape as input X and if check each element with dropout
+        mask = (torch.rand(X.shape) > dropout).float()
+        return mask * X / (1.0 - dropout)
         
     def plot(self, key, value, train):
         """Plot a point in animation."""
