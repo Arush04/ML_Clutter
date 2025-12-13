@@ -53,10 +53,10 @@ class FashionMNIST(Dataset):
                 [transforms.Resize(resize), transforms.ToTensor()]                
             )
         self.train = torchvision.datasets.FashionMNIST(
-                root="data", train=True, transform=transformed, download=False
+                root="test/data", train=True, transform=transformed, download=False
             )
         self.val = torchvision.datasets.FashionMNIST(
-                root="data", train=False, transform=transformed, download=False
+                root="test/data", train=False, transform=transformed, download=False
             )
     
     def text_labels(self, indices):
@@ -141,7 +141,10 @@ class Trainer():
         self.num_gpus = num_gpus
         self.gradient_clip_val = gradient_clip_val
         self.board = ProgressBoard()
-        assert num_gpus == 0
+        self.device = 'cpu'
+        if self.num_gpus > 0:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # assert num_gpus == 0
 
     def prepare_data(self, data):
         self.train_dataloader = data.get_dataloader(train=True)
@@ -152,7 +155,7 @@ class Trainer():
     def prepare_model(self, model):
         model.trainer = self
         model.board.xlim = [0, self.max_epochs]
-        self.model = model
+        self.model = model.to(self.device)
 
     def fit(self, model, data):
         self.prepare_data(data)
@@ -161,24 +164,43 @@ class Trainer():
         self.epoch = 0
         self.train_batch_idx = 0
         self.val_batch_idx = 0
+        self.total_train_loss = 0.0
+        self.total_train_batches = 0
         for self.epoch in range(self.max_epochs):
             self.fit_epoch()
+        train_loss = self.total_train_loss / self.total_train_batches
+        print(f"Final Train Loss: {train_loss:.4f}")
 
+    
+    def to_device(self, batch):
+        # helper function to move all samples to device
+        return [b.to(self.device) for b in batch]
+    
     def fit_epoch(self):
         self.model.train()
         for batch in self.train_dataloader:
+            batch = self.to_device(batch)
             loss = self.model.training_step(batch)
+            self.total_train_loss += loss.item()
+            self.total_train_batches += 1
             self.optim.zero_grad()
-            with torch.no_grad():
+            if self.num_gpus > 0:
                 loss.backward()
                 if self.gradient_clip_val > 0:
                     self.clip_gradients(self.gradient_clip_val, self.model)
                 self.optim.step()
+            else:
+                with torch.no_grad():
+                    loss.backward()
+                    if self.gradient_clip_val > 0:
+                        self.clip_gradients(self.gradient_clip_val, self.model)
+                    self.optim.step()
             self.train_batch_idx += 1
         if self.val_dataloader is None:
             return
         self.model.eval()
         for batch in self.val_dataloader:
+            batch = self.to_device(batch)
             with torch.no_grad():
                 self.model.validation_step(batch)
             self.val_batch_idx += 1
