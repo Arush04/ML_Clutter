@@ -127,3 +127,34 @@ class LSTM(RNN):
 
     def forward(self, inputs, H_C=None):
         return self.rnn(inputs, H_C)
+
+class StackedGRU(RNN):
+    "Deep GRU implementation"
+    def __init__(self, num_inputs, num_hiddens, num_layers, dropout=0, sigma=0.01):
+        nn.Module.__init__(self)
+        self.num_inputs = num_inputs
+        self.num_hiddens = num_hiddens
+        self.num_layers = int(num_layers)
+        self.sigma = sigma
+        self.dropout = dropout
+        self.rnn = nn.GRU(num_inputs, num_hiddens, num_layers,
+                          dropout=dropout)
+
+    def forward(self, inputs, Hs=None):
+        outputs, Hs = self.rnn(inputs, Hs)
+        return outputs, Hs
+
+class BiStackedGRU(RNN):
+    """Bi directional deep GRU"""
+    def __init__(self, num_inputs, num_hiddens, num_layers, sigma=0.01):
+        nn.Module.__init__(self)
+        self.num_inputs = num_inputs
+        self.num_hiddens = num_hiddens
+        self.num_layers = num_layers
+        self.sigma = sigma
+        self.rnn = nn.GRU(num_inputs, num_hiddens, num_layers=self.num_layers, bidirectional=True)
+        self.num_hiddens *= 2
+
+    def forward(self, inputs, Hs=None):
+        outputs, Hs = self.rnn(inputs, Hs)
+        return outputs, Hs
