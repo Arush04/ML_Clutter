@@ -53,10 +53,10 @@ class FashionMNIST(Dataset):
                 [transforms.Resize(resize), transforms.ToTensor()]                
             )
         self.train = torchvision.datasets.FashionMNIST(
-                root="test/data", train=True, transform=transformed, download=False
+                root="/home/arush/Arush/ML_Clutter/test/data", train=True, transform=transformed, download=False
             )
         self.val = torchvision.datasets.FashionMNIST(
-                root="test/data", train=False, transform=transformed, download=False
+                root="/home/arush/Arush/ML_Clutter/test/data", train=False, transform=transformed, download=False
             )
     
     def text_labels(self, indices):
@@ -115,25 +115,33 @@ class ProgressBoard:
             plt.ion()
             self.fig, self.ax = plt.subplots(figsize=self.figsize)
 
-    def draw(self, x, y, label, every_n=1):
+    def draw(self, x, y, label, every_n=1, xscale=None, yscale=None):
         self._init_plot()
-
+    
         if label not in self._data:
             self._data[label] = {'x': [], 'y': []}
-
+    
         self._data[label]['x'].append(x)
         self._data[label]['y'].append(float(y))
-
+    
         if len(self._data[label]['x']) % every_n == 0:
             self.ax.clear()
-
+    
             for lbl, items in self._data.items():
                 self.ax.plot(items['x'], items['y'], label=lbl)
-
+    
             self.ax.set_xlabel(self.xlabel)
+            self.ax.set_ylabel(self.ylabel)
+    
+            if xscale:
+                self.ax.set_xscale(xscale)
+            if yscale:
+                self.ax.set_yscale(yscale)
+    
             self.ax.legend()
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
+
 
 class Trainer():
     def __init__(self, max_epochs, num_gpus=0, gradient_clip_val=0):
@@ -204,3 +212,10 @@ class Trainer():
             with torch.no_grad():
                 self.model.validation_step(batch)
             self.val_batch_idx += 1
+
+    def clip_gradients(self, grad_clip_val, model):
+        params = [p for p in model.parameters() if p.requires_grad]
+        norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+        if norm > grad_clip_val:
+            for param in params:
+                param.grad[:] *= grad_clip_val / norm
