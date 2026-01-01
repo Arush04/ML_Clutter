@@ -4,6 +4,7 @@ import requests
 import collections
 import math
 import torch
+import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 
@@ -236,3 +237,12 @@ def bleu(pred_seq, label_seq, k):
                 label_subs[' '.join(pred_tokens[i: i + n])] -= 1
         score *= math.pow(num_matches / (len_pred - n + 1), math.pow(0.5, n))
     return score
+
+def init_seq2seq(module):
+    """Initialize weights for sequence-to-sequence learning."""
+    if type(module) == nn.Linear:
+         nn.init.xavier_uniform_(module.weight)
+    if type(module) == nn.GRU:
+        for param in module._flat_weights_names:
+            if "weight" in param:
+                nn.init.xavier_uniform_(module._parameters[param])
