@@ -111,7 +111,7 @@ class Vocab:
 # Seq2Seq dataset problem--------------------
 class MTFraEng(Dataset):
     """English French tab spaced dataset"""
-    def __init__(self, batch_size, num_steps=9, num_train=512, num_val=128):
+    def __init__(self, batch_size, num_steps=9, num_train=1024, num_val=512):
         super(MTFraEng, self).__init__()
         self.batch_size = batch_size
         self.num_steps = num_steps
