@@ -11,7 +11,7 @@ Just like with training ML models, knowing what regime you're in allows you to n
 
 ## Compute:
 
-memory (storage) --> send data to GPU (memory bandwidth) --> compute
+`memory (storage) --> send data to GPU (memory bandwidth) --> compute`
 
 if memory-bandwidth is small then the device cant perform to its max limit since not enough data is reaching it for operations(FLOPS)
 
@@ -30,7 +30,7 @@ Since we're spending all of our time on memory-bandwidth, such an operation is c
 
 Solution to this regime can in using torch.compile, writing custom kernels (Triton)
 
-Finally, operator fusion leads to some surprising consequences. For one, a fused x.cos().cos() will take nearly the exact same time as calling x.cos() by itself.
+Finally, operator fusion leads to some surprising consequences. For one, a fused `x.cos().cos()` will take nearly the exact same time as calling `x.cos()` by itself.
 This fact leads to some interesting consequences for rematerialization/activation checkpointing. Essentially, doing extra recomputation might lead to less memory-bandwidth, and thus less runtime. Thus, we can lower both memory and runtime through rematerialization, which we leveraged to build a neat min-cut optimization pass in AOTAutograd.
 
 Memory bound = bandwidth is utilised, compute is underutilized.
@@ -52,16 +52,16 @@ The primary reason this overhead exists is due to all of the flexibility framewo
 
 | Performance Regime  |	Plausible Solutions
 -----------------------------------------------------------------------------------
-| Overhead-Bound	  | Tracing, Operator Fusion, don't use Python, a real JIT :^)
-| Bandwidth-Bound	  | Operator Fusion
-| Compute-Bound	Use   | Tensor Cores, give Nvidia more money
+| Overhead-Bound  	  | Tracing, Operator Fusion, don't use Python, a real JIT :^)  
+| Bandwidth-Bound	    | Operator Fusion  
+| Compute-Bound	Use   | Tensor Cores, give Nvidia more money  
 
 # TORCH COMPILE:
 reference from: https://medium.com/@jiminlee-ai/how-torch-compile-actually-works-from-python-bytecode-to-fused-triton-kernels-1c78721c3331
 
 This is what happens during a standard CPU GPU conversation
 
-f(x) = return x*2 + 1
+`f(x) = return x*2 + 1`
 
 The CPU issues the following instructions to the GPU:
 1. Fetch: Go to the warehouse (HBM/VRAM), get x, bring it to the workbench (Registers).
@@ -82,9 +82,9 @@ The goal of torch.compile() is Operator Fusion. (Launching as minimum kernels as
 ## TorchDynamo:
 Analyzes python code and generates FX Graph -- a representation of your code consisting purely of PyTorch operations.
 
-for f(x) = return x*2 + 1
-It looks something like this (conceptually):
-x -> multiply -> add -> output
+for `f(x) = return x*2 + 1`  
+It looks something like this (conceptually):  
+`x -> multiply -> add -> output`
 
 Python code is compiled into bytecode before it runs. TorchDynamo hooks into the Python frame evaluation API (PEP 523) to "spy" on this bytecode right before it executes.
 It scans the bytecode and identifies PyTorch operations. If it sees something it understands (like torch.add), it adds it to the FX Graph.
@@ -111,7 +111,7 @@ The graph coming out of Dynamo is high-level. It contains complex instructions l
 
 AOTAutograd breaks these down into ATen IR (Intermediate Representation) — the lowest-level mathematical primitives.
 
-CrossEntropy becomes a combination of aten.log_softmax, aten.neg, and aten.nll_loss.
+CrossEntropy becomes a combination of `aten.log_softmax`, `aten.neg`, and `aten.nll_loss`.
 Eventually, everything becomes simple adds, multiplies, and matrix matmuls.
 So again we have a similifed grapgh with numbers wedges and simple ops like add, mult, mat muls as nodes.
 
@@ -122,8 +122,10 @@ Now we have a graph of primitive math operations. We need to turn this into fast
 Loop Fusion & Scheduling
 Inductor analyzes the graph and looks for Memory Bound operations to fuse.
 
-Before: Read A -> Multiply -> Save to Temp -> Read Temp -> Add -> Save to B.
-After (Fused): Read A -> Multiply & Add immediately (in registers) -> Save to B.
+Before:  
+`Read A -> Multiply -> Save to Temp -> Read Temp -> Add -> Save to B.`  
+After (Fused):  
+`Read A -> Multiply & Add immediately (in registers) -> Save to B.`  
 It eliminates the “Save to Temp” and “Read Temp” steps entirely. 
 
 ### Code Generation: Triton
@@ -162,8 +164,8 @@ So how exactly do we compute the dispatch key which we use to index into the dis
 
 The general concept is that we union together dispatch key sets from various sources (and in some case mask out some dispatch keys), giving us a final dispatch key set. Then, we pick the first dispatch key in the set (dispatch keys are implicitly ordered by some priority) and that is where we should dispatch to. What are these sources?
 
-Ex: 
-x = torch.tensor(..., device="cuda", requires_grad=True)
+Ex:  
+`x = torch.tensor(..., device="cuda", requires_grad=True)`
 
 with this, internally it will have key set as:
 {CUDA, Autograd}
@@ -180,7 +182,7 @@ Finally, we have a global set, which are dispatch keys that are always considere
 Dispatch works like layers:
 Example:
 
-User calls torch.add
+User calls `torch.add`
 
 - Tracing wrapper runs
 - Inside it, it redispatches
