@@ -9,7 +9,7 @@ It consists of two important elements
 
 2. A Gate network or router: it determines which tokens are sent to which expert.
 
-![sparse switch ffn layer](images/moe_layer.png)
+![sparse switch ffn layer](/images/moe_layer.png)
 
 ## Disadvatages
 
