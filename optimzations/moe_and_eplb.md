@@ -60,6 +60,8 @@ When the cluster configuration does not align cleanly with expert groups.
 - The replicated experts are then distributed across GPUs regardless of expert grouping.
 - Tokens can be routed to any available replica of an expert.
 
+![EPLB](/images/eplb-architecture.svg)
+
 Sources:  
 [1] Mixture of Experts Explained (https://huggingface.co/blog/moe)  
 [2] EPLB (https://github.com/deepseek-ai/EPLB)
